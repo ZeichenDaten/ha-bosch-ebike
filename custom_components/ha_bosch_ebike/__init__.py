@@ -687,9 +687,20 @@ async def ws_get_all_tracks(
     semaphore = asyncio.Semaphore(3)
     results: list[dict] = []
 
+    def _is_standalone_external_activity(activity: dict) -> bool:
+        """Return whether an activity must never be fetched from Bosch."""
+        activity_id = str(activity.get("id") or "")
+        source = str(activity.get("source") or "")
+        return activity_id.startswith("komoot:") or source.startswith("komoot")
+
     async def fetch_one(coord, activity, account_id, account_label):
         aid = activity.get("id")
         if not aid:
+            return
+        # Standalone GPX/Komoot activities have synthetic IDs and their
+        # points are appended from the local external-GPX store below.
+        # Sending those IDs to Bosch only produces repeated HTTP 400 errors.
+        if _is_standalone_external_activity(activity):
             return
         if cutoff is not None or range_from is not None or range_to is not None:
             try:
