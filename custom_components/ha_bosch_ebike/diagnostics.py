@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 from .coordinator import BoschEBikeCoordinator
+from .komoot_sync import get_komoot_manager
 
 # Keys that are redacted recursively before the dump leaves the instance.
 # Secrets (tokens, client id) plus location/identity data (GPS, serials).
@@ -31,6 +32,8 @@ TO_REDACT = {
     "frameNumberPosition",
     "address",
     "description",
+    "komoot_email",
+    "komoot_password",
 }
 
 
@@ -47,6 +50,10 @@ async def async_get_config_entry_diagnostics(
             "data": async_redact_data(dict(entry.data), TO_REDACT),
             "options": async_redact_data(dict(entry.options), TO_REDACT),
         }
+    }
+    manager = get_komoot_manager(hass, entry.entry_id)
+    diag["komoot_sync"] = manager.diagnostics() if manager else {
+        "enabled": False
     }
 
     if coordinator is None or coordinator.data is None:

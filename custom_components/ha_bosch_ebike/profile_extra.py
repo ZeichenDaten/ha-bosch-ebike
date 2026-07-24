@@ -32,6 +32,7 @@ ASSIST_MODE_NAMES: dict[str, str] = {
     "A100M00010": "TURBO",
     "A100M0AUTO": "AUTO",
     "A100EAAAB0": "eMTB",
+    "A100E1AAB0": "eMTB",
     "A100MSPIC7": "eMTB+",
     "A100MSPIC8": "eMTB+",
     "A100MAAAB0": "eMTB-shortcrank",

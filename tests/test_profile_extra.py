@@ -63,6 +63,7 @@ def test_assist_mode_display_name_mapping_and_fallback():
     assert assist_mode_display_name("A100MAAAA0") == "TOUR+"
     assert assist_mode_display_name("A100M00020") == "SPORT"
     assert assist_mode_display_name("A100EAAAB0") == "eMTB"
+    assert assist_mode_display_name("A100E1AAB0") == "eMTB"
     assert assist_mode_display_name("A100MAAAB0") == "eMTB-shortcrank"
     # unknown code (no AUTO/ECOP substring) is returned unchanged
     assert assist_mode_display_name("A100M99999") == "A100M99999"

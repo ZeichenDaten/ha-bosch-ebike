@@ -32,7 +32,11 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     DOMAIN,
@@ -49,6 +53,17 @@ from .const import (
     OAUTH_SCOPE,
     FLOW_PORTAL_URL,
     BES2_PORTAL_URL,
+    CONF_KOMOOT_BIKE_ID,
+    CONF_KOMOOT_EMAIL,
+    CONF_KOMOOT_ENABLED,
+    CONF_KOMOOT_PASSWORD,
+    CONF_KOMOOT_SCAN_INTERVAL,
+    DEFAULT_KOMOOT_SCAN_INTERVAL,
+)
+from .komoot_api import (
+    KomootApiClient,
+    KomootApiError,
+    KomootAuthenticationError,
 )
 from .profile_extra import bike_label
 
@@ -243,6 +258,12 @@ class BoschEBikeOptionsFlowHandler(OptionsFlow):
         self._activity_index: int = 0
         self._activity_assignments: dict[str, str] = {}
 
+    def _merged_options(self, updates: dict[str, Any]) -> dict[str, Any]:
+        """Keep unrelated options when one wizard branch is saved."""
+        merged = dict(self.config_entry.options or {})
+        merged.update(updates)
+        return merged
+
     @staticmethod
     def _entity_schema(suggested: dict[str, Any]) -> vol.Schema:
         sensor_selector = EntitySelector(
@@ -285,7 +306,10 @@ class BoschEBikeOptionsFlowHandler(OptionsFlow):
         if self._bike_index >= len(self._bikes):
             _LOGGER.debug("Options flow finishing (no more bikes to show)")
             return self.async_create_entry(
-                title="", data={CONF_LIVE_SENSORS: self._live_sensors}
+                title="",
+                data=self._merged_options(
+                    {CONF_LIVE_SENSORS: self._live_sensors}
+                ),
             )
         bike = self._bikes[self._bike_index]
         label = self._display_name_for_bike(bike)
@@ -371,12 +395,12 @@ class BoschEBikeOptionsFlowHandler(OptionsFlow):
         self._activity_index = 0
         self._activity_assignments = {}
 
-        if not self._unassigned:
-            return await self._async_show_bike_step()
-
+        menu_options = ["live_sensors", "komoot"]
+        if self._unassigned:
+            menu_options.append("assign_activities")
         return self.async_show_menu(
             step_id="init",
-            menu_options=["live_sensors", "assign_activities"],
+            menu_options=menu_options,
         )
 
     async def async_step_live_sensors(
@@ -384,6 +408,112 @@ class BoschEBikeOptionsFlowHandler(OptionsFlow):
     ) -> ConfigFlowResult:
         """Menu target: continue into the existing per-bike BLE-sensor wizard."""
         return await self._async_show_bike_step()
+
+    async def async_step_komoot(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure optional automatic imports from Komoot."""
+        current = dict(self.config_entry.options or {})
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            enabled = bool(user_input.get(CONF_KOMOOT_ENABLED))
+            email = str(
+                user_input.get(CONF_KOMOOT_EMAIL)
+                or current.get(CONF_KOMOOT_EMAIL)
+                or ""
+            ).strip()
+            password = str(
+                user_input.get(CONF_KOMOOT_PASSWORD)
+                or current.get(CONF_KOMOOT_PASSWORD)
+                or ""
+            )
+            bike_id = str(
+                user_input.get(CONF_KOMOOT_BIKE_ID)
+                or current.get(CONF_KOMOOT_BIKE_ID)
+                or ""
+            )
+            interval = int(
+                user_input.get(
+                    CONF_KOMOOT_SCAN_INTERVAL,
+                    current.get(
+                        CONF_KOMOOT_SCAN_INTERVAL,
+                        DEFAULT_KOMOOT_SCAN_INTERVAL,
+                    ),
+                )
+            )
+
+            if enabled and (not email or not password or not bike_id):
+                errors["base"] = "komoot_missing_credentials"
+            elif enabled:
+                client = KomootApiClient(
+                    async_get_clientsession(self.hass), email, password
+                )
+                try:
+                    await client.async_login()
+                except KomootAuthenticationError:
+                    errors["base"] = "komoot_invalid_auth"
+                except KomootApiError:
+                    errors["base"] = "komoot_cannot_connect"
+
+            if not errors:
+                updates = {
+                    CONF_KOMOOT_ENABLED: enabled,
+                    CONF_KOMOOT_EMAIL: email,
+                    CONF_KOMOOT_BIKE_ID: bike_id,
+                    CONF_KOMOOT_SCAN_INTERVAL: interval,
+                }
+                if password:
+                    updates[CONF_KOMOOT_PASSWORD] = password
+                return self.async_create_entry(
+                    title="", data=self._merged_options(updates)
+                )
+
+        bike_choices = {
+            bike["id"]: self._display_name_for_bike(bike)
+            for bike in self._bikes
+            if bike.get("id")
+        }
+        default_bike = (
+            current.get(CONF_KOMOOT_BIKE_ID)
+            or (next(iter(bike_choices)) if bike_choices else "")
+        )
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_KOMOOT_ENABLED,
+                default=bool(current.get(CONF_KOMOOT_ENABLED, False)),
+            ): bool,
+            vol.Optional(
+                CONF_KOMOOT_EMAIL,
+                description={
+                    "suggested_value": current.get(CONF_KOMOOT_EMAIL, "")
+                },
+            ): str,
+            # Never put the existing password back into the form. An empty
+            # submission preserves it; a non-empty value replaces it.
+            vol.Optional(CONF_KOMOOT_PASSWORD): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            ),
+            vol.Required(
+                CONF_KOMOOT_SCAN_INTERVAL,
+                default=int(
+                    current.get(
+                        CONF_KOMOOT_SCAN_INTERVAL,
+                        DEFAULT_KOMOOT_SCAN_INTERVAL,
+                    )
+                ),
+            ): vol.In({15: "15 min", 30: "30 min", 60: "60 min"}),
+        }
+        if bike_choices:
+            schema_fields[
+                vol.Required(CONF_KOMOOT_BIKE_ID, default=default_bike)
+            ] = vol.In(bike_choices)
+
+        return self.async_show_form(
+            step_id="komoot",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+        )
 
     async def async_step_assign_activities(
         self, user_input: dict[str, Any] | None = None

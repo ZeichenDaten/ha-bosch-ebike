@@ -42,7 +42,19 @@
       "init": {
         "menu_options": {
           "live_sensors": "Live-BLE-Sensoren konfigurieren",
+          "komoot": "Automatischen Komoot-Import konfigurieren",
           "assign_activities": "Nicht zugeordnete Aktivitäten einem Bike zuweisen"
+        }
+      },
+      "komoot": {
+        "title": "Automatischer Komoot-Import",
+        "description": "Importiert neue aufgezeichnete Komoot-Touren automatisch alle 15–60 Minuten. Komoot bietet keine offizielle API; bei Änderungen an der internen Schnittstelle kann daher Wartung nötig werden. Das Passwort bleibt im privaten Konfigurationseintrag und erscheint weder in Logs noch in Diagnosen.",
+        "data": {
+          "komoot_enabled": "Automatischen Import aktivieren",
+          "komoot_email": "Komoot-E-Mail-Adresse",
+          "komoot_password": "Komoot-Passwort (leer lassen, um das gespeicherte zu behalten)",
+          "komoot_bike_id": "Bike für importierte Touren",
+          "komoot_scan_interval": "Synchronisationsintervall"
         }
       },
       "assign_activities": {
@@ -64,6 +76,11 @@
           "live_soc_entity": "Sensor mit dem Akku-Ladezustand in Prozent (z. B. sensor.ebike_battery_soc_live)."
         }
       }
+    },
+    "error": {
+      "komoot_missing_credentials": "Zum Aktivieren werden E-Mail-Adresse, Passwort und Bike benötigt.",
+      "komoot_invalid_auth": "Komoot hat E-Mail-Adresse oder Passwort abgelehnt.",
+      "komoot_cannot_connect": "Komoot ist momentan nicht erreichbar. Bitte später erneut versuchen."
     }
   },
   "entity": {

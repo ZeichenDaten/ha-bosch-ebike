@@ -14,8 +14,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_KOMOOT_BIKE_ID
 from .coordinator import BoschEBikeCoordinator
+from .komoot_sync import get_komoot_manager
 
 
 def _safe_get(data: dict, *keys: str, default: Any = None) -> Any:
@@ -168,8 +169,47 @@ async def async_setup_entry(
         entities.append(
             BoschGPSImportSingleButton(coordinator, bike_id, drive_name)
         )
+        manager = get_komoot_manager(hass, entry.entry_id)
+        if (
+            manager is not None
+            and entry.options.get(CONF_KOMOOT_BIKE_ID) == bike_id
+        ):
+            entities.append(
+                KomootSyncButton(
+                    coordinator, manager, bike_id, drive_name
+                )
+            )
 
     async_add_entities(entities)
+
+
+class KomootSyncButton(ButtonEntity):
+    """Trigger the same safe sync used by the periodic scheduler."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:cloud-sync"
+
+    def __init__(
+        self,
+        coordinator: BoschEBikeCoordinator,
+        manager: Any,
+        bike_id: str,
+        drive_name: str,
+    ) -> None:
+        self._coordinator = coordinator
+        self._manager = manager
+        self._attr_unique_id = f"{bike_id}_komoot_sync"
+        self._attr_name = "Komoot jetzt synchronisieren"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, bike_id)},
+            name=drive_name,
+            manufacturer="Bosch",
+            model=drive_name,
+        )
+
+    async def async_press(self) -> None:
+        """Synchronise without touching any physical bike actuator."""
+        await self._manager.async_sync(reason="button")
 
 
 class BoschGPSImportButton(ButtonEntity):

@@ -2,12 +2,12 @@
   "domain": "ha_bosch_ebike",
   "name": "Bosch eBike (Smart System & eBike System 2)",
   "after_dependencies": ["lovelace", "recorder"],
-  "codeowners": ["@Xunil99"],
+  "codeowners": ["@ZeichenDaten"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api"],
-  "documentation": "https://github.com/Xunil99/ha-bosch-ebike",
+  "documentation": "https://github.com/ZeichenDaten/ha-bosch-ebike",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/Xunil99/ha-bosch-ebike/issues",
+  "issue_tracker": "https://github.com/ZeichenDaten/ha-bosch-ebike/issues",
   "requirements": [],
-  "version": "1.19.35b1"
+  "version": "1.20.0"
 }

@@ -39,6 +39,7 @@ EVENT_SERVICE_DUE_SOON = f"{DOMAIN}_service_due_soon"
 EVENT_SERVICE_OVERDUE = f"{DOMAIN}_service_overdue"
 EVENT_MAINTENANCE_DUE_SOON = f"{DOMAIN}_maintenance_due_soon"
 EVENT_MAINTENANCE_OVERDUE = f"{DOMAIN}_maintenance_overdue"
+EVENT_KOMOOT_SYNC_COMPLETED = f"{DOMAIN}_komoot_sync_completed"
 
 REDIRECT_URI = "http://localhost:8888/callback"
 
@@ -70,6 +71,15 @@ CONF_LIVE_SOC_ENTITY = "live_soc_entity"
 # The flat CONF_LIVE_ODOMETER_ENTITY/CONF_LIVE_SOC_ENTITY keys above remain as
 # a legacy fallback for accounts that saved options before this key existed.
 CONF_LIVE_SENSORS = "live_sensors"
+
+# Optional automatic import from Komoot's undocumented web API. Credentials
+# live in the config entry's private options and are never logged/diagnosed.
+CONF_KOMOOT_ENABLED = "komoot_enabled"
+CONF_KOMOOT_EMAIL = "komoot_email"
+CONF_KOMOOT_PASSWORD = "komoot_password"
+CONF_KOMOOT_BIKE_ID = "komoot_bike_id"
+CONF_KOMOOT_SCAN_INTERVAL = "komoot_scan_interval"
+DEFAULT_KOMOOT_SCAN_INTERVAL = 30
 
 # Diagnosis Field Data API (dealer Bosch DiagnosticTool 3 / Capacity Tester
 # data: batteries, drive-units, capacity-testers).

@@ -34,6 +34,11 @@ from .const import (
     CONF_LIVE_SENSORS,
 )
 from .energy_cost import compute_energy_windows
+from .external_gpx import (
+    external_activity_bikes,
+    external_activity_consumption,
+    external_activity_entries,
+)
 from .live_enrichment import get_state_at, parse_iso_utc
 from .range_estimate import (
     compute_range_estimate,
@@ -480,7 +485,12 @@ class BoschEBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         current_ids = {a.get("id") for a in self._all_activities if a.get("id")}
         new_ids = current_ids - self._prev_activity_ids
-        new_activities = [a for a in self._all_activities if a.get("id") in new_ids]
+        new_activities = [
+            activity
+            for activity in self._all_activities
+            if activity.get("id") in new_ids
+            and not str(activity.get("source") or "").startswith("komoot")
+        ]
 
         state_changed = False
         # Ids that stayed unresolved this poll (no bike attribution yet, or
@@ -643,6 +653,11 @@ class BoschEBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for activity in self._all_activities:
             aid = activity.get("id")
             if not aid:
+                continue
+            # Standalone Komoot tours use the conservative contact-window
+            # journal. Exact-time recorder samples can be stale even when
+            # their timestamps look fresh and must not bypass that matching.
+            if str(activity.get("source") or "").startswith("komoot"):
                 continue
             bike_id = self._activity_bike.get(aid)
             odo_entity = self.live_odometer_entity(bike_id)
@@ -1324,6 +1339,36 @@ class BoschEBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # track can finish uploading only after a newer ride has appeared.
         await self._recheck_recent_activity_distances()
 
+        # Standalone imports participate in statistics and personal range,
+        # while linked GPX files remain a track fallback for their Bosch
+        # activity and therefore do not create duplicates.
+        previous_external = [
+            item
+            for item in self._all_activities
+            if str(item.get("source") or "").startswith("komoot")
+        ]
+        self._all_activities = [
+            item
+            for item in self._all_activities
+            if not str(item.get("source") or "").startswith("komoot")
+        ]
+        current_external = external_activity_entries(self.hass)
+        external_merge_changed = previous_external != current_external
+        existing_activity_ids = {
+            item.get("id") for item in self._all_activities if item.get("id")
+        }
+        for external_activity in current_external:
+            if external_activity.get("id") in existing_activity_ids:
+                continue
+            self._all_activities.append(external_activity)
+            existing_activity_ids.add(external_activity.get("id"))
+            external_merge_changed = True
+        if external_merge_changed:
+            self._all_activities.sort(
+                key=lambda item: str(item.get("startTime") or ""),
+                reverse=True,
+            )
+
         # Restore persisted consumption state on first run
         await self.async_load_persisted_state()
 
@@ -1336,7 +1381,11 @@ class BoschEBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # attribution from the prior poll; the same applies to consumption.
         new_attribution = self.attribute_activities_to_bikes(bikes, self._all_activities)
         merged_attribution = merge_manual_overrides(new_attribution, self._manual_activity_bike)
-        state_changed = merged_attribution != self._activity_bike
+        merged_attribution.update(external_activity_bikes(self.hass))
+        state_changed = (
+            external_merge_changed
+            or merged_attribution != self._activity_bike
+        )
         if state_changed:
             self._activity_bike = merged_attribution
 
@@ -1357,6 +1406,23 @@ class BoschEBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # tour start and end.
         if await self._enrich_activities_with_live_data():
             state_changed = True
+
+        # A successfully matched Komoot contact pair is more specific than
+        # Bosch lifetime-Wh allocation or recorder proximity. Clear stale
+        # journal-derived rows when the source GPX was deleted/re-evaluated.
+        external_consumption = external_activity_consumption(self.hass)
+        for activity_id, value in list(self._activity_consumption.items()):
+            if (
+                isinstance(value, dict)
+                and value.get("source") == "komoot_ble_journal"
+                and activity_id not in external_consumption
+            ):
+                del self._activity_consumption[activity_id]
+                state_changed = True
+        for activity_id, value in external_consumption.items():
+            if self._activity_consumption.get(activity_id) != value:
+                self._activity_consumption[activity_id] = value
+                state_changed = True
 
         # Seed service-due overrides from Bosch on first sight of a bike
         if self._seed_service_overrides(bikes):

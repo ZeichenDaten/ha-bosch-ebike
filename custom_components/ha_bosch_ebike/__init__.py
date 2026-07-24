@@ -41,9 +41,28 @@ from .const import (
     DEFAULT_SYSTEM,
     CONF_BES2_SERIAL,
     CONF_BES2_PART,
+    CONF_LIVE_ODOMETER_ENTITY,
+    CONF_LIVE_SOC_ENTITY,
+    CONF_LIVE_SENSORS,
+    CONF_KOMOOT_BIKE_ID,
+    CONF_KOMOOT_ENABLED,
 )
 from .coordinator import BoschEBikeCoordinator
+from .external_gpx import (
+    apply_activity_title_overrides,
+    async_setup_external_gpx,
+    external_activity_entries,
+    external_track_for_activity,
+    merge_external_track_entries,
+)
+from .komoot_sync import (
+    DATA_KOMOOT_MANAGERS,
+    DATA_RIDE_JOURNALS,
+    KomootSyncManager,
+    build_komoot_client,
+)
 from .profile_extra import bike_label as _bike_label
+from .ride_journal import RideContactJournal
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -203,6 +222,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             loaded_routes if isinstance(loaded_routes, list) else []
         )
 
+    await async_setup_external_gpx(hass)
+
     _register_services(hass)
 
     # Register static path for the Lovelace card
@@ -247,6 +268,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    # The BLE contact journal is deliberately independent of both Komoot and
+    # the user's garage automations. Starting it whenever live sensors are
+    # configured means a later Komoot sync can safely match departure and
+    # arrival even if no Bosch/Flow recording was running.
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    journals_by_entry = domain_data.setdefault(DATA_RIDE_JOURNALS, {})
+    entry_journals: dict[str, RideContactJournal] = {}
+    live_sensors = entry.options.get(CONF_LIVE_SENSORS) or {}
+    bikes = coordinator.data.get("bikes", []) if coordinator.data else []
+    if not live_sensors and len(bikes) == 1:
+        legacy = {
+            key: entry.options.get(key)
+            for key in (CONF_LIVE_ODOMETER_ENTITY, CONF_LIVE_SOC_ENTITY)
+            if entry.options.get(key)
+        }
+        if legacy and bikes[0].get("id"):
+            live_sensors = {bikes[0]["id"]: legacy}
+
+    for bike_id, sensors in live_sensors.items():
+        if not isinstance(sensors, dict):
+            continue
+        soc_entity = sensors.get(CONF_LIVE_SOC_ENTITY)
+        odometer_entity = sensors.get(CONF_LIVE_ODOMETER_ENTITY)
+        if not isinstance(soc_entity, str) or not isinstance(
+            odometer_entity, str
+        ):
+            continue
+        journal = RideContactJournal(
+            hass,
+            entry_id=entry.entry_id,
+            bike_id=str(bike_id),
+            soc_entity_id=soc_entity,
+            odometer_entity_id=odometer_entity,
+        )
+        if await journal.async_setup():
+            entry_journals[str(bike_id)] = journal
+            entry.async_on_unload(journal.async_stop)
+    journals_by_entry[entry.entry_id] = entry_journals
+
+    # Komoot remains optional. A missing credential disables only this
+    # manager; Bosch data and the direct BLE journal continue normally.
+    if entry.options.get(CONF_KOMOOT_ENABLED):
+        client = build_komoot_client(hass, entry)
+        bike_id = str(entry.options.get(CONF_KOMOOT_BIKE_ID) or "")
+        if client is not None and bike_id:
+            manager = KomootSyncManager(
+                hass,
+                entry,
+                coordinator,
+                client,
+                entry_journals.get(bike_id),
+            )
+            managers = domain_data.setdefault(DATA_KOMOOT_MANAGERS, {})
+            managers[entry.entry_id] = manager
+            entry.async_on_unload(manager.async_stop)
+            manager.async_start()
+        else:
+            _LOGGER.warning(
+                "Automatic Komoot import is enabled but its credentials or "
+                "bike assignment are incomplete"
+            )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -295,6 +378,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
+        managers = hass.data[DOMAIN].get(DATA_KOMOOT_MANAGERS, {})
+        if isinstance(managers, dict):
+            managers.pop(entry.entry_id, None)
+        journals = hass.data[DOMAIN].get(DATA_RIDE_JOURNALS, {})
+        if isinstance(journals, dict):
+            journals.pop(entry.entry_id, None)
     return unload_ok
 
 
@@ -437,6 +526,14 @@ async def ws_list_activities(
                 entry["consumption"] = cons
             result.append(entry)
 
+    existing_ids = {item.get("id") for item in result}
+    result.extend(
+        item
+        for item in external_activity_entries(hass)
+        if item.get("id") not in existing_ids
+    )
+    result = apply_activity_title_overrides(hass, result)
+    result.sort(key=lambda item: item.get("startTime") or "", reverse=True)
     connection.send_result(msg["id"], {"activities": result})
 
 
@@ -451,48 +548,75 @@ async def ws_list_activities(
 async def ws_get_track(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
-    """Return GPS track points for a specific activity."""
+    """Return Bosch GPS points, falling back to a linked Komoot GPX import."""
+    activity_id = msg["activity_id"]
+    external = external_track_for_activity(hass, activity_id)
+
+    # Standalone Komoot imports never exist in the Bosch cloud.
+    if activity_id.startswith("komoot:") and external:
+        connection.send_result(msg["id"], {"track": external.get("points", [])})
+        return
+
     requested_entry = msg.get("config_entry_id")
     coordinator = _get_coordinator(hass, requested_entry)
     if not coordinator:
-        # Fall back: search every coordinator for one that knows this activity
-        activity_id = msg["activity_id"]
-        for c in _all_coordinators(hass).values():
-            ids = {a.get("id") for a in (c.data.get("all_activities", []) if c.data else [])}
+        for candidate in _all_coordinators(hass).values():
+            ids = {
+                activity.get("id")
+                for activity in (
+                    candidate.data.get("all_activities", [])
+                    if candidate.data
+                    else []
+                )
+            }
             if activity_id in ids:
-                coordinator = c
+                coordinator = candidate
                 break
     if not coordinator:
-        connection.send_error(msg["id"], "not_found", "No Bosch eBike integration found")
+        if external:
+            connection.send_result(msg["id"], {"track": external.get("points", [])})
+        else:
+            connection.send_error(
+                msg["id"], "not_found", "No Bosch eBike integration found"
+            )
         return
 
-    activity_id = msg["activity_id"]
     try:
         detail = await coordinator.fetch_track_detail(activity_id)
         points = detail.get("activityDetails", [])
 
-        # Filter and slim down the data
         track = []
-        for p in points:
-            lat = p.get("latitude")
-            lon = p.get("longitude")
-            if lat is None or lon is None:
+        for point in points:
+            lat = point.get("latitude")
+            lon = point.get("longitude")
+            if lat is None or lon is None or (lat == 0 and lon == 0):
                 continue
-            if lat == 0 and lon == 0:
-                continue
-            track.append({
-                "lat": lat,
-                "lon": lon,
-                "ele": p.get("altitude"),
-                "speed": p.get("speed"),
-                "cadence": p.get("cadence"),
-                "power": p.get("riderPower"),
-                "distance": p.get("distance"),
-            })
+            track.append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "ele": point.get("altitude"),
+                    "speed": point.get("speed"),
+                    "cadence": point.get("cadence"),
+                    "power": point.get("riderPower"),
+                    "distance": point.get("distance"),
+                }
+            )
+        if not track and external:
+            track = external.get("points", [])
 
         connection.send_result(msg["id"], {"track": track})
-
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
+        if external:
+            _LOGGER.debug(
+                "Using imported GPX fallback for activity %s after Bosch error: %s",
+                activity_id,
+                err,
+            )
+            connection.send_result(
+                msg["id"], {"track": external.get("points", [])}
+            )
+            return
         _LOGGER.error("Failed to fetch track for %s: %s", activity_id, err)
         connection.send_error(msg["id"], "fetch_error", str(err))
 
@@ -626,6 +750,16 @@ async def ws_get_all_tracks(
             tasks.append(fetch_one(coord, act, entry_id, label))
 
     await asyncio.gather(*tasks)
+
+    results = merge_external_track_entries(
+        hass,
+        results,
+        max_age_days=max_age_days,
+        date_from=date_from_raw,
+        date_to=date_to_raw,
+    )
+
+    results = apply_activity_title_overrides(hass, results)
 
     # Sort by start_time desc
     results.sort(key=lambda r: r.get("start_time") or "", reverse=True)

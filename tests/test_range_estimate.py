@@ -60,7 +60,7 @@ def test_happy_path():
 
 
 def test_distance_weighted():
-    # 100 km à 5 Wh/km (als 2 Touren, MIN_TOURS=3) + 10 km à 16.5 Wh/km
+    # 100 km à 5 Wh/km (als 2 Touren) + 10 km à 16.5 Wh/km
     # -> (500+165)/110 Wh/km, auf 2 Nachkommastellen gerundet
     activities = [act("a1", 50), act("a1b", 50), act("a2", 10)]
     bike_map = {"a1": "bike1", "a1b": "bike1", "a2": "bike1"}
@@ -83,6 +83,16 @@ def test_window_stops_at_500km():
     assert abs(r["window_km"] - 500.0) < 0.001
 
 
+def test_window_stops_after_ten_tours_before_distance_limit():
+    # 12 Touren à 20 km: MAX_TOURS=10 stoppt bereits bei 200 km.
+    activities = [act(f"a{i}", 20) for i in range(12)]
+    bike_map = {f"a{i}": "bike1" for i in range(12)}
+    cons = {f"a{i}": {"consumed_wh": 100.0} for i in range(12)}
+    r = compute_range_estimate(activities, bike_map, cons, "bike1")
+    assert r["tours_used"] == 10
+    assert abs(r["window_km"] - 200.0) < 0.001
+
+
 def test_window_overshoot_includes_crossing_tour():
     # 9 Touren à 60 km: Tour 9 überschreitet die 500-km-Grenze (480 -> 540 km)
     # und wird laut Doku trotzdem noch mitgenommen
@@ -95,15 +105,22 @@ def test_window_overshoot_includes_crossing_tour():
 
 
 def test_min_data_thresholds():
-    # nur 2 Touren -> None; 3 Touren aber < 30 km -> None
+    # Eine Tour reicht nicht; zwei Touren müssen zusammen mindestens 30 km haben.
+    activities = [act("a1", 40)]
+    bike_map = {"a1": "bike1"}
+    cons = {"a1": {"consumed_wh": 200.0}}
+    assert compute_range_estimate(activities, bike_map, cons, "bike1") is None
+
     activities = [act("a1", 20), act("a2", 20)]
     bike_map = {"a1": "bike1", "a2": "bike1"}
     cons = {"a1": {"consumed_wh": 100.0}, "a2": {"consumed_wh": 100.0}}
-    assert compute_range_estimate(activities, bike_map, cons, "bike1") is None
+    result = compute_range_estimate(activities, bike_map, cons, "bike1")
+    assert result is not None
+    assert result["tours_used"] == 2
 
-    activities = [act(f"a{i}", 5) for i in range(3)]
-    bike_map = {f"a{i}": "bike1" for i in range(3)}
-    cons = {f"a{i}": {"consumed_wh": 25.0} for i in range(3)}
+    activities = [act(f"a{i}", 5) for i in range(2)]
+    bike_map = {f"a{i}": "bike1" for i in range(2)}
+    cons = {f"a{i}": {"consumed_wh": 25.0} for i in range(2)}
     assert compute_range_estimate(activities, bike_map, cons, "bike1") is None
 
 

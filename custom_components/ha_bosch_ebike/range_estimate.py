@@ -11,7 +11,8 @@ from typing import Any
 
 # Defaults mirror docs/plans/2026-06-10-range-estimate-design.md
 DEFAULT_WINDOW_KM = 500.0
-MIN_TOURS = 3
+MAX_TOURS = 10
+MIN_TOURS = 2
 MIN_KM = 30.0
 MIN_TOUR_KM = 0.5
 
@@ -64,7 +65,7 @@ def compute_range_estimate(
         tours += 1
         if newest_date is None:
             newest_date = activity.get("startTime")
-        if total_km >= window_km:
+        if total_km >= window_km or tours >= MAX_TOURS:
             break
 
     if tours < MIN_TOURS or total_km < MIN_KM:

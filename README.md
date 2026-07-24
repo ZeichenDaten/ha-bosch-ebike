@@ -2,7 +2,21 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Xunil99&repository=ha-bosch-ebike&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ZeichenDaten&repository=ha-bosch-ebike&category=integration)
+
+> [!IMPORTANT]
+> **Carbon-ara-Fork:** Dieser Fork basiert auf `v1.19.34` des
+> [Originalprojekts](https://github.com/Xunil99/ha-bosch-ebike) und ergänzt
+> einen optionalen automatischen Import aufgezeichneter Komoot-Touren,
+> idempotente GPX-Verwaltung sowie eine konservative Verbrauchsermittlung
+> über die separat konfigurierte ESPHome-BLE-Bridge. Komoot stellt dafür
+> keine offiziell unterstützte API bereit; Änderungen an deren interner
+> Schnittstelle können daher Anpassungen dieses Forks erfordern.
+>
+> Zugangsdaten werden ausschließlich in den privaten Optionen des
+> Home-Assistant-Konfigurationseintrags gespeichert und in Diagnoseausgaben
+> redigiert. Gelöschte automatisch importierte Touren bleiben bewusst
+> unterdrückt und werden beim nächsten Abgleich nicht sofort wieder angelegt.
 
 > **Deutsch** | [English](#english) | [Nederlands](https://github.com/Xunil99/ha-bosch-ebike/blob/main/README.nl.md) | [Français](https://github.com/Xunil99/ha-bosch-ebike/blob/main/README.fr.md) | [Italiano](https://github.com/Xunil99/ha-bosch-ebike/blob/main/README.it.md) | [Español](https://github.com/Xunil99/ha-bosch-ebike/blob/main/README.es.md)
 
