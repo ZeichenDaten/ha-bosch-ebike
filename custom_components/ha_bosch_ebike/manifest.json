@@ -9,5 +9,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/ZeichenDaten/ha-bosch-ebike/issues",
   "requirements": [],
-  "version": "1.20.2"
+  "version": "1.20.3"
 }

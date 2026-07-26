@@ -945,12 +945,12 @@ async def ws_set_activity_title(
         ),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_set_imported_gpx_consumption(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
 ) -> None:
     """Store an admin-verified consumption repair for one imported track."""
-    connection.require_admin()
     record = next(
         (item for item in _tracks(hass) if item.get("id") == msg["track_id"]),
         None,
