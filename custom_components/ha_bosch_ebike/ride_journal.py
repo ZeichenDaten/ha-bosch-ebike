@@ -9,7 +9,7 @@ import uuid
 
 from homeassistant.core import Event, HomeAssistant, State, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -21,7 +21,10 @@ STORE_VERSION = 1
 MAX_WINDOWS = 100
 RETENTION = timedelta(days=30)
 FRESH_SAMPLE = timedelta(minutes=2)
+MAX_SAMPLE_SKEW = timedelta(seconds=10)
+MAX_FUTURE_SKEW = timedelta(seconds=5)
 STALE_ACTIVE = timedelta(minutes=15)
+CONTACT_SETTLE_DELAY = timedelta(seconds=3)
 INVALID_STATES = {None, "", "unknown", "unavailable"}
 
 
@@ -45,6 +48,35 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     return result if result.tzinfo is not None else None
+
+
+def _state_reported_at(state: State | None) -> datetime | None:
+    """Return when Home Assistant most recently received this state.
+
+    ``last_updated`` only changes when a value or its attributes change.
+    ESPHome can legitimately report the same SoC again when the bike
+    reconnects; Home Assistant records that receipt in ``last_reported``.
+    """
+    if state is None:
+        return None
+    reported = getattr(state, "last_reported", None)
+    if isinstance(reported, datetime):
+        return reported
+    updated = getattr(state, "last_updated", None)
+    return updated if isinstance(updated, datetime) else None
+
+
+def _timestamp_is_fresh(now: datetime, reported_at: datetime | None) -> bool:
+    """Validate one HA timestamp without trusting incompatible clocks."""
+    if reported_at is None:
+        return False
+    try:
+        if now.utcoffset() is None or reported_at.utcoffset() is None:
+            return False
+        age = now - reported_at
+    except (TypeError, ValueError):
+        return False
+    return -MAX_FUTURE_SKEW <= age <= FRESH_SAMPLE
 
 
 def _discover_contact_entities(
@@ -97,6 +129,7 @@ class RideContactJournal:
         self._windows: list[dict[str, Any]] = []
         self._active: dict[str, Any] | None = None
         self._unsub: Callable[[], None] | None = None
+        self._delayed_capture_unsub: Callable[[], None] | None = None
 
     @property
     def available(self) -> bool:
@@ -148,6 +181,7 @@ class RideContactJournal:
         if connected is not None and connected.state == "on":
             self._ensure_active(dt_util.now(), reliable_start=False)
             self._capture_sample(dt_util.now())
+            self._schedule_delayed_capture()
         elif self._active is not None:
             # HA restarted while the bridge was absent/off. Preserve the data
             # for diagnostics, but never use the guessed end for matching.
@@ -164,6 +198,7 @@ class RideContactJournal:
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
+        self._cancel_delayed_capture()
 
     @callback
     def _async_state_changed(self, event: Event) -> None:
@@ -182,7 +217,9 @@ class RideContactJournal:
                         self._close_active(last_seen, reliable_end=False)
                 self._ensure_active(now, reliable_start=old_value == "off")
                 self._capture_sample(now)
+                self._schedule_delayed_capture()
             elif old_value == "on" and new_value == "off":
+                self._cancel_delayed_capture()
                 self._capture_sample(now)
                 self._close_active(now, reliable_end=True)
             elif (
@@ -201,6 +238,36 @@ class RideContactJournal:
             return
         self._ensure_active(now, reliable_start=False)
         self._capture_sample(now)
+
+    @callback
+    def _cancel_delayed_capture(self) -> None:
+        if self._delayed_capture_unsub is not None:
+            self._delayed_capture_unsub()
+            self._delayed_capture_unsub = None
+
+    @callback
+    def _schedule_delayed_capture(self) -> None:
+        """Sample after ESPHome has published its reconnect snapshot."""
+        self._cancel_delayed_capture()
+        window_id = self._active.get("id") if self._active is not None else None
+
+        @callback
+        def _capture(_now: datetime) -> None:
+            self._delayed_capture_unsub = None
+            connected = self.hass.states.get(self.connected_entity_id)
+            if (
+                connected is None
+                or connected.state != "on"
+                or self._active is None
+                or self._active.get("id") != window_id
+            ):
+                return
+            now = dt_util.now()
+            self._capture_sample(now)
+
+        self._delayed_capture_unsub = async_call_later(
+            self.hass, CONTACT_SETTLE_DELAY, _capture
+        )
 
     @callback
     def _ensure_active(self, now: datetime, *, reliable_start: bool) -> None:
@@ -229,7 +296,12 @@ class RideContactJournal:
         # efficient. Keeping no automatic consumption is safer than guessing.
         if self.charger_entity_id:
             charger_state = self.hass.states.get(self.charger_entity_id)
-            if charger_state is not None and charger_state.state == "on":
+            charger_reported_at = _state_reported_at(charger_state)
+            if (
+                charger_state is None
+                or charger_state.state != "off"
+                or not _timestamp_is_fresh(now, charger_reported_at)
+            ):
                 return
         soc_state = self.hass.states.get(self.soc_entity_id)
         odometer_state = self.hass.states.get(self.odometer_entity_id)
@@ -239,9 +311,12 @@ class RideContactJournal:
             return
         if not 0 <= soc <= 100 or odometer_km < 0:
             return
+        soc_reported_at = _state_reported_at(soc_state)
+        odometer_reported_at = _state_reported_at(odometer_state)
         if (
-            now - soc_state.last_updated > FRESH_SAMPLE
-            or now - odometer_state.last_updated > FRESH_SAMPLE
+            not _timestamp_is_fresh(now, soc_reported_at)
+            or not _timestamp_is_fresh(now, odometer_reported_at)
+            or abs(soc_reported_at - odometer_reported_at) > MAX_SAMPLE_SKEW
         ):
             return
 

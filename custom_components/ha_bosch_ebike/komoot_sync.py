@@ -431,15 +431,17 @@ class KomootSyncManager:
             tour_distance_m=distance_m,
             windows=self.journal.reliable_windows(),
         )
-        consumption = None
-        if decision.match is not None:
-            consumption = consumption_from_match(
-                decision.match,
-                capacity_wh=self.coordinator.battery_capacity_wh(
-                    self.bike_id
-                ),
-                activity_distance_m=distance_m,
-            )
+        if decision.match is None:
+            return False
+        consumption = consumption_from_match(
+            decision.match,
+            capacity_wh=self.coordinator.battery_capacity_wh(
+                self.bike_id
+            ),
+            activity_distance_m=distance_m,
+        )
+        if consumption is None:
+            return False
         return await async_set_provider_consumption(
             self.hass,
             provider=PROVIDER,

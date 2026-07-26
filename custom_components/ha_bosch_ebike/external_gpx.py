@@ -79,6 +79,9 @@ async def async_setup_external_gpx(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_imported_gpx)
     websocket_api.async_register_command(hass, ws_delete_imported_gpx)
     websocket_api.async_register_command(hass, ws_set_activity_title)
+    websocket_api.async_register_command(
+        hass, ws_set_imported_gpx_consumption
+    )
 
 
 def _tracks(hass: HomeAssistant) -> list[dict[str, Any]]:
@@ -171,6 +174,63 @@ async def async_set_provider_consumption(
         record.pop("consumption", None)
     await _save(hass)
     return True
+
+
+def _replace_provider_record(
+    existing: dict[str, Any],
+    replacement: dict[str, Any],
+    consumption: dict[str, Any] | None,
+) -> None:
+    """Replace provider metadata without discarding confirmed consumption."""
+    previous = existing.get("consumption")
+    retained = (
+        dict(consumption)
+        if isinstance(consumption, dict)
+        else dict(previous)
+        if isinstance(previous, dict)
+        else None
+    )
+    existing.clear()
+    existing.update(replacement)
+    if retained is not None:
+        existing["consumption"] = retained
+
+
+def _verified_manual_consumption(
+    record: dict[str, Any],
+    *,
+    start_soc: float,
+    end_soc: float,
+    capacity_wh: float,
+    session_distance_m: float,
+) -> dict[str, Any] | None:
+    """Build a manually verified value using the automatic safety bounds."""
+    try:
+        activity_distance_m = float(record.get("distance") or 0)
+    except (TypeError, ValueError):
+        return None
+    percentage = start_soc - end_soc
+    if (
+        activity_distance_m <= 0
+        or percentage < 1.0
+        or percentage > 90.0
+        or capacity_wh <= 0
+        or session_distance_m < 300.0
+    ):
+        return None
+    ratio = session_distance_m / activity_distance_m
+    if not 0.55 <= ratio <= 1.8:
+        return None
+    return {
+        "consumed_wh": round(capacity_wh * percentage / 100.0, 1),
+        "percentage": round(percentage, 1),
+        "capacity_wh": round(capacity_wh, 1),
+        "start_soc": round(start_soc, 1),
+        "end_soc": round(end_soc, 1),
+        "session_distance_m": round(session_distance_m, 1),
+        "source": "komoot_ble_journal",
+        "verified_manual": True,
+    }
 
 
 def _record_storage_bytes(record: dict[str, Any]) -> int:
@@ -671,8 +731,8 @@ async def async_upsert_provider_gpx(
 
     record_id = existing["id"]
     imported_at = existing.get("imported_at") or now_iso
-    existing.clear()
-    existing.update(
+    _replace_provider_record(
+        existing,
         {
             "id": record_id,
             "activity_id": activity_id,
@@ -685,10 +745,9 @@ async def async_upsert_provider_gpx(
             "provider_id": provider_id,
             "provider_changed_at": provider_changed_at,
             **parsed,
-        }
+        },
+        consumption,
     )
-    if isinstance(consumption, dict):
-        existing["consumption"] = dict(consumption)
     await _save(hass)
     return {"status": status, "record": existing}
 
@@ -864,6 +923,64 @@ async def ws_set_activity_title(
             "activity_id": activity_id,
             "title": title or None,
             "overridden": bool(title),
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "bosch_ebike/set_imported_gpx_consumption",
+        vol.Required("track_id"): str,
+        vol.Required("start_soc"): vol.All(
+            vol.Coerce(float), vol.Range(min=0, max=100)
+        ),
+        vol.Required("end_soc"): vol.All(
+            vol.Coerce(float), vol.Range(min=0, max=100)
+        ),
+        vol.Required("capacity_wh"): vol.All(
+            vol.Coerce(float), vol.Range(min=1, max=2000)
+        ),
+        vol.Required("session_distance_m"): vol.All(
+            vol.Coerce(float), vol.Range(min=300, max=500_000)
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_set_imported_gpx_consumption(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Store an admin-verified consumption repair for one imported track."""
+    connection.require_admin()
+    record = next(
+        (item for item in _tracks(hass) if item.get("id") == msg["track_id"]),
+        None,
+    )
+    if record is None:
+        connection.send_error(
+            msg["id"], "not_found", "Imported GPX track not found"
+        )
+        return
+    consumption = _verified_manual_consumption(
+        record,
+        start_soc=msg["start_soc"],
+        end_soc=msg["end_soc"],
+        capacity_wh=msg["capacity_wh"],
+        session_distance_m=msg["session_distance_m"],
+    )
+    if consumption is None:
+        connection.send_error(
+            msg["id"],
+            "invalid_consumption",
+            "The verified values are not physically plausible for this track",
+        )
+        return
+    record["consumption"] = consumption
+    await _save(hass)
+    connection.send_result(
+        msg["id"],
+        {
+            "track": _public_record(record),
+            "consumption": dict(consumption),
         },
     )
 
