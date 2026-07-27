@@ -19,6 +19,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .material_changes import material_tour_changes
 
 DATA_TRACKS = "external_gpx_tracks"
 DATA_STORE = "external_gpx_store"
@@ -672,7 +673,7 @@ async def async_upsert_provider_gpx(
         and provider_changed_at
         and existing.get("provider_changed_at") == provider_changed_at
     ):
-        return {"status": "unchanged", "record": existing}
+        return {"status": "unchanged", "record": existing, "changes": []}
 
     parsed = _parse_gpx(gpx_content, filename, None)
     parsed = _apply_authoritative_metadata(parsed, metadata)
@@ -719,7 +720,16 @@ async def async_upsert_provider_gpx(
             existing = close_matches[0]
 
     now_iso = dt_util.utcnow().isoformat()
-    status = "updated" if existing is not None else "created"
+    changes = (
+        material_tour_changes(existing, parsed)
+        if existing is not None
+        else []
+    )
+    status = (
+        "created"
+        if existing is None
+        else ("updated" if changes else "refreshed")
+    )
     if existing is None:
         if len(tracks) >= MAX_TRACKS:
             raise vol.Invalid(f"Maximum of {MAX_TRACKS} imports reached")
@@ -749,7 +759,7 @@ async def async_upsert_provider_gpx(
         consumption,
     )
     await _save(hass)
-    return {"status": status, "record": existing}
+    return {"status": status, "record": existing, "changes": changes}
 
 
 def _within_range(

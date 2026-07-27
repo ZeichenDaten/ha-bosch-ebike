@@ -34,6 +34,10 @@ from .komoot_api import (
     KomootRateLimitError,
 )
 from .komoot_gpx import detail_to_gpx
+from .material_changes import (
+    build_notification_summary,
+    material_consumption_change,
+)
 from .ride_journal import RideContactJournal
 from .ride_matcher import (
     consumption_from_match,
@@ -228,12 +232,45 @@ class KomootSyncManager:
         async with self._lock:
             created = 0
             updated = 0
+            provider_refreshed = 0
             consumption_added = 0
             ignored = 0
             failed = 0
             latest_title: str | None = None
             latest_distance = 0.0
             changed_anything = False
+            material_events: dict[str, dict[str, Any]] = {}
+
+            def add_material_event(
+                provider_id: str,
+                record: dict[str, Any],
+                *,
+                kind: str,
+                changes: list[dict[str, Any]] | None = None,
+            ) -> None:
+                event = material_events.setdefault(
+                    provider_id,
+                    {
+                        "provider_id": provider_id,
+                        "kind": kind,
+                        "title": str(record.get("title") or "Komoot-Tour"),
+                        "distance": float(record.get("distance") or 0),
+                        "changes": [],
+                    },
+                )
+                if kind == "created":
+                    event["kind"] = "created"
+                known_fields = {
+                    str(change.get("field"))
+                    for change in event["changes"]
+                    if isinstance(change, dict)
+                }
+                for change in changes or []:
+                    field = str(change.get("field") or "")
+                    if field and field not in known_fields:
+                        event["changes"].append(change)
+                        known_fields.add(field)
+
             try:
                 tours = await self.client.async_list_tours()
                 tours.sort(
@@ -265,11 +302,26 @@ class KomootSyncManager:
                         and existing.get("provider_changed_at")
                         == summary_changed_at
                     ):
+                        old_consumption = (
+                            dict(existing.get("consumption") or {})
+                            if isinstance(existing.get("consumption"), dict)
+                            else None
+                        )
                         if await self._async_enrich_consumption(
                             provider_id, existing
                         ):
                             consumption_added += 1
                             changed_anything = True
+                            consumption_change = material_consumption_change(
+                                old_consumption, existing.get("consumption")
+                            )
+                            if consumption_change is not None:
+                                add_material_event(
+                                    provider_id,
+                                    existing,
+                                    kind="updated",
+                                    changes=[consumption_change],
+                                )
                         continue
 
                     try:
@@ -333,6 +385,9 @@ class KomootSyncManager:
                     elif status == "updated":
                         updated += 1
                         changed_anything = True
+                    elif status == "refreshed":
+                        provider_refreshed += 1
+                        changed_anything = True
                     elif status == "ignored":
                         ignored += 1
                         continue
@@ -343,11 +398,33 @@ class KomootSyncManager:
                         latest_distance = latest_distance or float(
                             record.get("distance") or 0
                         )
+                        if status in {"created", "updated"}:
+                            add_material_event(
+                                provider_id,
+                                record,
+                                kind=status,
+                                changes=list(result.get("changes") or []),
+                            )
+                        old_consumption = (
+                            dict(record.get("consumption") or {})
+                            if isinstance(record.get("consumption"), dict)
+                            else None
+                        )
                         if await self._async_enrich_consumption(
                             provider_id, record
                         ):
                             consumption_added += 1
                             changed_anything = True
+                            consumption_change = material_consumption_change(
+                                old_consumption, record.get("consumption")
+                            )
+                            if consumption_change is not None:
+                                add_material_event(
+                                    provider_id,
+                                    record,
+                                    kind="updated",
+                                    changes=[consumption_change],
+                                )
 
                 if changed_anything:
                     await self.coordinator.async_request_refresh()
@@ -359,12 +436,15 @@ class KomootSyncManager:
                     "reason": reason,
                     "created": created,
                     "updated": updated,
+                    "provider_refreshed": provider_refreshed,
                     "consumption_added": consumption_added,
                     "ignored": ignored,
                     "failed": failed,
                     "tour_count": len(tours),
+                    "material_updates": len(material_events),
                 }
-                if created or updated:
+                if material_events:
+                    tours_payload = list(material_events.values())
                     self.hass.bus.async_fire(
                         EVENT_KOMOOT_SYNC_COMPLETED,
                         {
@@ -372,11 +452,25 @@ class KomootSyncManager:
                             "bike_id": self.bike_id,
                             "created": created,
                             "updated": updated,
+                            "provider_refreshed": provider_refreshed,
                             "consumption_added": consumption_added,
                             "failed": failed,
                             "latest_title": latest_title,
                             "latest_distance_km": round(
                                 latest_distance / 1000.0, 1
+                            ),
+                            "tours": tours_payload,
+                            "changed_fields": sorted(
+                                {
+                                    str(change.get("field"))
+                                    for tour in tours_payload
+                                    for change in tour.get("changes", [])
+                                    if isinstance(change, dict)
+                                    and change.get("field")
+                                }
+                            ),
+                            "change_summary": build_notification_summary(
+                                tours_payload
                             ),
                         },
                     )
@@ -467,7 +561,12 @@ def build_komoot_client(
     """Create a client only when all private options are present."""
     email = entry.options.get(CONF_KOMOOT_EMAIL)
     password = entry.options.get(CONF_KOMOOT_PASSWORD)
-    if not isinstance(email, str) or not email or not isinstance(password, str) or not password:
+    if (
+        not isinstance(email, str)
+        or not email
+        or not isinstance(password, str)
+        or not password
+    ):
         return None
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 

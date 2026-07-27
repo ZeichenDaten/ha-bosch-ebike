@@ -49,6 +49,10 @@ async def async_set_provider_consumption(_hass, **kwargs):
     return True
 
 
+async def async_upsert_provider_gpx(hass, **_kwargs):
+    return hass.upsert_result
+
+
 namespace = {
     "Any": Any,
     "PROVIDER": "komoot",
@@ -99,6 +103,17 @@ sync_namespace = {
     ),
     "provider_import_is_ignored": lambda *_args: False,
     "provider_record": lambda hass, _provider, _provider_id: hass.record,
+    "async_upsert_provider_gpx": async_upsert_provider_gpx,
+    "detail_to_gpx": lambda _detail: "<gpx />",
+    "normalise_komoot_metadata": lambda _summary, _detail: {
+        "title": "Tour",
+        "start_time": "2026-01-15T10:00:00+00:00",
+        "distance": 40_000,
+    },
+    "find_matching_bosch_activity": lambda *_args, **_kwargs: None,
+    "komoot_changed_at": lambda summary, _detail: summary.get("changed_at"),
+    "build_notification_summary": lambda _tours: "material summary",
+    "material_consumption_change": lambda _old, _new: None,
 }
 exec(
     compile(
@@ -128,6 +143,7 @@ RECORD = {
 class FakeCoordinator:
     def __init__(self):
         self.refreshes = 0
+        self.data = {"all_activities": []}
 
     async def async_request_refresh(self):
         self.refreshes += 1
@@ -144,10 +160,18 @@ class FakeSyncManager:
                     "percentage": 60.0,
                 },
             },
-            bus=SimpleNamespace(async_fire=lambda *_args: None),
+            upsert_result=None,
+            fired_events=[],
+            bus=SimpleNamespace(),
+        )
+        self.hass.bus.async_fire = (
+            lambda event_type, event_data: self.hass.fired_events.append(
+                (event_type, event_data)
+            )
         )
         self.client = SimpleNamespace(
-            async_list_tours=self._async_list_tours
+            async_list_tours=self._async_list_tours,
+            async_get_tour_detail=self._async_get_tour_detail,
         )
         self.coordinator = FakeCoordinator()
         self.entry = SimpleNamespace(entry_id="entry-1")
@@ -165,6 +189,9 @@ class FakeSyncManager:
                 "changed_at": "same-revision",
             }
         ]
+
+    async def _async_get_tour_detail(self, _provider_id, language="de"):
+        return {"language": language}
 
     async def _async_enrich_consumption(self, _provider_id, _record):
         self.enrich_calls += 1
@@ -225,6 +252,55 @@ def test_full_sync_with_purged_journal_is_a_true_noop():
         "consumed_wh": 240.0,
         "percentage": 60.0,
     }
+
+
+def test_provider_only_revision_refreshes_data_without_event():
+    manager = FakeSyncManager()
+    manager.hass.record["provider_changed_at"] = "old-revision"
+    record = {
+        "title": "Tour",
+        "distance": 40_000,
+        "consumption": {"consumed_wh": 240.0, "percentage": 60.0},
+    }
+    manager.hass.upsert_result = {
+        "status": "refreshed",
+        "record": record,
+        "changes": [],
+    }
+
+    result = asyncio.run(sync_tours(manager, reason="scheduled"))
+
+    assert result["provider_refreshed"] == 1
+    assert result["material_updates"] == 0
+    assert manager.coordinator.refreshes == 1
+    assert manager.hass.fired_events == []
+
+
+def test_material_update_fires_structured_summary_event():
+    manager = FakeSyncManager()
+    manager.hass.record["provider_changed_at"] = "old-revision"
+    manager.hass.upsert_result = {
+        "status": "updated",
+        "record": {"title": "Tour", "distance": 40_100},
+        "changes": [
+            {
+                "field": "distance",
+                "label": "Distanz",
+                "old": 40_000,
+                "new": 40_100,
+            }
+        ],
+    }
+
+    result = asyncio.run(sync_tours(manager, reason="scheduled"))
+
+    assert result["updated"] == 1
+    assert result["material_updates"] == 1
+    assert manager.hass.fired_events[0][0] == "komoot_sync_completed"
+    payload = manager.hass.fired_events[0][1]
+    assert payload["changed_fields"] == ["distance"]
+    assert payload["change_summary"] == "material summary"
+    assert payload["tours"][0]["changes"][0]["field"] == "distance"
 
 
 if __name__ == "__main__":

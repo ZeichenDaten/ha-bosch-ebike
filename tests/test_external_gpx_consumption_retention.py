@@ -61,6 +61,18 @@ upsert_namespace = {
     "_parse_time": lambda value: (
         datetime.fromisoformat(value) if value else None
     ),
+    "material_tour_changes": lambda old, new: (
+        [
+            {
+                "field": "title",
+                "label": "Titel",
+                "old": old.get("title"),
+                "new": new.get("title"),
+            }
+        ]
+        if old.get("title") != new.get("title")
+        else []
+    ),
     "_replace_provider_record": replace_provider_record,
     "_save": save_tracks,
     "_tracks": lambda hass: hass.tracks,
@@ -157,6 +169,45 @@ def test_real_provider_upsert_persists_existing_consumption():
     assert result["record"]["provider_changed_at"] == "new-revision"
     assert result["record"]["consumption"] == previous
     assert saved_tracks[0]["consumption"] == previous
+
+
+def test_provider_only_revision_is_persisted_without_material_update():
+    hass = SimpleNamespace(
+        tracks=[
+            {
+                "id": "track-1",
+                "provider": "komoot",
+                "provider_id": "tour-1",
+                "provider_changed_at": "old-revision",
+                "imported_at": "2026-01-15T09:00:00+00:00",
+                "title": "Updated tour",
+            }
+        ]
+    )
+    original_detector = upsert_provider_gpx.__globals__["material_tour_changes"]
+    upsert_provider_gpx.__globals__["material_tour_changes"] = (
+        lambda _old, _new: []
+    )
+    try:
+        result = asyncio.run(
+            upsert_provider_gpx(
+                hass,
+                provider="komoot",
+                provider_id="tour-1",
+                provider_changed_at="social-only-revision",
+                gpx_content="<gpx />",
+                filename="tour.gpx",
+                bike_id="bike-1",
+            )
+        )
+    finally:
+        upsert_provider_gpx.__globals__["material_tour_changes"] = (
+            original_detector
+        )
+
+    assert result["status"] == "refreshed"
+    assert result["changes"] == []
+    assert result["record"]["provider_changed_at"] == "social-only-revision"
 
 
 def test_verified_manual_repair_uses_the_same_physical_bounds():
