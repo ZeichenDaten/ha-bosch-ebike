@@ -14,7 +14,7 @@ from typing import Any
 
 DEPARTURE_BEFORE = timedelta(minutes=45)
 DEPARTURE_AFTER = timedelta(minutes=10)
-ARRIVAL_BEFORE = timedelta(minutes=10)
+ARRIVAL_BEFORE = timedelta(minutes=45)
 ARRIVAL_AFTER = timedelta(minutes=45)
 AMBIGUITY_SECONDS = 5 * 60
 

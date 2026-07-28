@@ -100,6 +100,46 @@ def test_matches_departure_and_arrival_and_uses_whole_tour_distance():
     assert consumption["source"] == "komoot_ble_journal"
 
 
+def test_matches_arrival_before_late_komoot_tour_end():
+    """A forgotten Komoot stop must not hide an otherwise exact BLE match."""
+    windows = [
+        window(
+            "departure",
+            START - timedelta(hours=1),
+            START + timedelta(minutes=2),
+            100,
+            303.26,
+            100,
+            303.26,
+        ),
+        window(
+            "arrival",
+            END - timedelta(minutes=26),
+            END + timedelta(minutes=20),
+            69,
+            323.36,
+            69,
+            323.36,
+        ),
+    ]
+
+    decision = match_contact_windows(
+        tour_start=START,
+        tour_end=END,
+        tour_distance_m=20_496,
+        windows=windows,
+    )
+
+    assert decision.status == "matched"
+    assert decision.match is not None
+    consumption = consumption_from_match(
+        decision.match, capacity_wh=400, activity_distance_m=20_496
+    )
+    assert consumption is not None
+    assert consumption["percentage"] == 31.0
+    assert consumption["consumed_wh"] == 124.0
+
+
 def test_friend_bike_without_contact_pair_is_not_attributed():
     decision = match_contact_windows(
         tour_start=START,
