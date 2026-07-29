@@ -33,6 +33,12 @@ timestamp_fresh_node = next(
     if isinstance(node, ast.FunctionDef)
     and node.name == "_timestamp_is_fresh"
 )
+parse_datetime_node = next(
+    node
+    for node in tree.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_parse_datetime"
+)
 capture_node = next(
     node
     for node in ast.walk(tree)
@@ -82,6 +88,7 @@ exec(
                 as_float_node,
                 reported_at_node,
                 timestamp_fresh_node,
+                parse_datetime_node,
                 capture_node,
                 cancel_delayed_node,
                 schedule_delayed_node,
@@ -144,7 +151,11 @@ class FakeJournal:
 
     def __init__(self, states):
         self.hass = SimpleNamespace(states=FakeStates(states))
-        self._active = {"first_sample": None, "last_sample": None}
+        self._active = {
+            "started_at": NOW.isoformat(),
+            "first_sample": None,
+            "last_sample": None,
+        }
         self.saved = 0
 
     def _schedule_save(self):
@@ -200,6 +211,52 @@ def test_capture_accepts_unchanged_values_reported_on_reconnect():
     assert journal._active["first_sample"]["soc"] == 100
     assert journal._active["first_sample"]["odometer_km"] == 100.125
     assert journal._active["last_sample"] == journal._active["first_sample"]
+
+
+def test_capture_replaces_stale_reconnect_snapshot_during_settle_delay():
+    states = {
+        "binary_sensor.charger": sensor_state(
+            "off", updated=NOW, reported=NOW
+        ),
+        "sensor.soc": sensor_state(100, updated=NOW, reported=NOW),
+        "sensor.odometer": sensor_state(
+            323.379, updated=NOW, reported=NOW
+        ),
+    }
+    journal = FakeJournal(states)
+
+    capture_sample(journal, NOW)
+    assert journal._active["first_sample"]["soc"] == 100
+
+    refreshed_at = NOW + timedelta(seconds=2)
+    states["binary_sensor.charger"] = sensor_state(
+        "off", updated=refreshed_at, reported=refreshed_at
+    )
+    states["sensor.soc"] = sensor_state(
+        55, updated=refreshed_at, reported=refreshed_at
+    )
+    states["sensor.odometer"] = sensor_state(
+        341.7, updated=refreshed_at, reported=refreshed_at
+    )
+    capture_sample(journal, refreshed_at)
+
+    assert journal._active["first_sample"]["soc"] == 55
+    assert journal._active["first_sample"]["odometer_km"] == 341.7
+
+    after_settle = NOW + timedelta(seconds=4)
+    states["binary_sensor.charger"] = sensor_state(
+        "off", updated=after_settle, reported=after_settle
+    )
+    states["sensor.soc"] = sensor_state(
+        54, updated=after_settle, reported=after_settle
+    )
+    states["sensor.odometer"] = sensor_state(
+        341.702, updated=after_settle, reported=after_settle
+    )
+    capture_sample(journal, after_settle)
+
+    assert journal._active["first_sample"]["soc"] == 55
+    assert journal._active["last_sample"]["soc"] == 54
 
 
 def test_capture_rejects_unsafe_charger_states():

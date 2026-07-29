@@ -325,7 +325,12 @@ class RideContactJournal:
             "soc": soc,
             "odometer_km": odometer_km,
         }
-        if self._active.get("first_sample") is None:
+        started_at = _parse_datetime(self._active.get("started_at"))
+        settling = (
+            started_at is not None
+            and started_at <= now <= started_at + CONTACT_SETTLE_DELAY
+        )
+        if self._active.get("first_sample") is None or settling:
             self._active["first_sample"] = sample
         self._active["last_sample"] = sample
         self._active["last_seen_at"] = now.isoformat()
