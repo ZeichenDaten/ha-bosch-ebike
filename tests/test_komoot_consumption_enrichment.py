@@ -131,6 +131,10 @@ class FakeManager:
     bike_id = "bike-1"
     journal = SimpleNamespace(reliable_windows=lambda: [])
     coordinator = SimpleNamespace(battery_capacity_wh=lambda _bike_id: 400)
+    match_diagnostics = []
+
+    def _record_consumption_match(self, provider_id, *, status, reason):
+        self.match_diagnostics.append((provider_id, status, reason))
 
 
 RECORD = {
@@ -201,8 +205,11 @@ class FakeSyncManager:
 def setup_function():
     global decision, derived_consumption
     setter_calls.clear()
-    decision = SimpleNamespace(match=None)
+    decision = SimpleNamespace(
+        match=None, status="unmatched", reason="no_plausible_contact_pair"
+    )
     derived_consumption = None
+    FakeManager.match_diagnostics.clear()
 
 
 def test_no_match_does_not_clear_previously_confirmed_consumption():
@@ -210,6 +217,9 @@ def test_no_match_does_not_clear_previously_confirmed_consumption():
 
     assert changed is False
     assert setter_calls == []
+    assert FakeManager.match_diagnostics == [
+        ("tour-1", "unmatched", "no_plausible_contact_pair")
+    ]
 
 
 def test_invalid_consumption_does_not_clear_previously_confirmed_consumption():

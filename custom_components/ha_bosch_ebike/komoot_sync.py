@@ -49,6 +49,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PROVIDER = "komoot"
 MAX_SYNC_TOURS = 100
+MAX_MATCH_DIAGNOSTICS = 20
 INITIAL_SYNC_DELAY_SECONDS = 15
 DATA_KOMOOT_MANAGERS = "komoot_sync_managers"
 DATA_RIDE_JOURNALS = "ride_contact_journals"
@@ -189,6 +190,22 @@ class KomootSyncManager:
         self.last_sync: str | None = None
         self.last_error: str | None = None
         self.last_result: dict[str, Any] = {}
+        self._consumption_match_diagnostics: dict[str, dict[str, Any]] = {}
+
+    def _record_consumption_match(
+        self, provider_id: str, *, status: str, reason: str
+    ) -> None:
+        """Retain recent non-secret matching outcomes for diagnostics."""
+        self._consumption_match_diagnostics.pop(provider_id, None)
+        self._consumption_match_diagnostics[provider_id] = {
+            "provider_id": provider_id,
+            "status": status,
+            "reason": reason,
+            "at": dt_util.now().isoformat(),
+        }
+        while len(self._consumption_match_diagnostics) > MAX_MATCH_DIAGNOSTICS:
+            oldest = next(iter(self._consumption_match_diagnostics))
+            self._consumption_match_diagnostics.pop(oldest)
 
     @callback
     def async_start(self) -> None:
@@ -509,14 +526,23 @@ class KomootSyncManager:
         self, provider_id: str, record: dict[str, Any]
     ) -> bool:
         if self.journal is None:
+            self._record_consumption_match(
+                provider_id, status="unmatched", reason="journal_unavailable"
+            )
             return False
         start = parse_datetime(record.get("start_time"))
         end = parse_datetime(record.get("end_time"))
         try:
             distance_m = float(record.get("distance") or 0)
         except (TypeError, ValueError):
+            self._record_consumption_match(
+                provider_id, status="unmatched", reason="invalid_distance"
+            )
             return False
         if start is None or end is None:
+            self._record_consumption_match(
+                provider_id, status="unmatched", reason="invalid_timestamps"
+            )
             return False
 
         decision = match_contact_windows(
@@ -526,6 +552,11 @@ class KomootSyncManager:
             windows=self.journal.reliable_windows(),
         )
         if decision.match is None:
+            self._record_consumption_match(
+                provider_id,
+                status=decision.status,
+                reason=decision.reason or "no_match",
+            )
             return False
         consumption = consumption_from_match(
             decision.match,
@@ -535,13 +566,24 @@ class KomootSyncManager:
             activity_distance_m=distance_m,
         )
         if consumption is None:
+            self._record_consumption_match(
+                provider_id,
+                status="unmatched",
+                reason="invalid_consumption",
+            )
             return False
-        return await async_set_provider_consumption(
+        changed = await async_set_provider_consumption(
             self.hass,
             provider=PROVIDER,
             provider_id=provider_id,
             consumption=consumption,
         )
+        self._record_consumption_match(
+            provider_id,
+            status="matched",
+            reason="stored" if changed else "already_current",
+        )
+        return changed
 
     def diagnostics(self) -> dict[str, Any]:
         """Non-secret manager status for downloaded diagnostics."""
@@ -551,6 +593,9 @@ class KomootSyncManager:
             "last_sync": self.last_sync,
             "last_error": self.last_error,
             "last_result": dict(self.last_result),
+            "recent_consumption_matches": list(
+                self._consumption_match_diagnostics.values()
+            ),
             "journal": self.journal.diagnostics() if self.journal else None,
         }
 

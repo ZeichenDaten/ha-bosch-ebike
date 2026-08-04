@@ -76,7 +76,7 @@ namespace = {
     "FRESH_SAMPLE": timedelta(minutes=2),
     "MAX_SAMPLE_SKEW": timedelta(seconds=10),
     "MAX_FUTURE_SKEW": timedelta(seconds=5),
-    "CONTACT_SETTLE_DELAY": timedelta(seconds=3),
+    "CONTACT_SETTLE_DELAY": timedelta(seconds=10),
     "INVALID_STATES": {None, "", "unknown", "unavailable"},
     "async_call_later": fake_async_call_later,
     "dt_util": SimpleNamespace(now=lambda: NOW),
@@ -228,7 +228,7 @@ def test_capture_replaces_stale_reconnect_snapshot_during_settle_delay():
     capture_sample(journal, NOW)
     assert journal._active["first_sample"]["soc"] == 100
 
-    refreshed_at = NOW + timedelta(seconds=2)
+    refreshed_at = NOW + timedelta(seconds=3, milliseconds=800)
     states["binary_sensor.charger"] = sensor_state(
         "off", updated=refreshed_at, reported=refreshed_at
     )
@@ -243,7 +243,7 @@ def test_capture_replaces_stale_reconnect_snapshot_during_settle_delay():
     assert journal._active["first_sample"]["soc"] == 55
     assert journal._active["first_sample"]["odometer_km"] == 341.7
 
-    after_settle = NOW + timedelta(seconds=4)
+    after_settle = NOW + timedelta(seconds=11)
     states["binary_sensor.charger"] = sensor_state(
         "off", updated=after_settle, reported=after_settle
     )
@@ -257,6 +257,36 @@ def test_capture_replaces_stale_reconnect_snapshot_during_settle_delay():
 
     assert journal._active["first_sample"]["soc"] == 55
     assert journal._active["last_sample"]["soc"] == 54
+
+
+def test_charging_update_during_settle_delay_is_not_captured():
+    states = {
+        "binary_sensor.charger": sensor_state(
+            "off", updated=NOW, reported=NOW
+        ),
+        "sensor.soc": sensor_state(55, updated=NOW, reported=NOW),
+        "sensor.odometer": sensor_state(
+            341.7, updated=NOW, reported=NOW
+        ),
+    }
+    journal = FakeJournal(states)
+    capture_sample(journal, NOW)
+    original = dict(journal._active["first_sample"])
+
+    charging_at = NOW + timedelta(seconds=5)
+    states["binary_sensor.charger"] = sensor_state(
+        "on", updated=charging_at, reported=charging_at
+    )
+    states["sensor.soc"] = sensor_state(
+        56, updated=charging_at, reported=charging_at
+    )
+    states["sensor.odometer"] = sensor_state(
+        341.7, updated=charging_at, reported=charging_at
+    )
+    capture_sample(journal, charging_at)
+
+    assert journal._active["first_sample"] == original
+    assert journal._active["last_sample"] == original
 
 
 def test_capture_rejects_unsafe_charger_states():
@@ -369,7 +399,7 @@ def test_delayed_capture_runs_only_for_the_same_connected_window():
     schedule_delayed_capture(journal)
 
     delay, callback_fn = scheduled_callbacks[0]
-    assert delay == timedelta(seconds=3)
+    assert delay == timedelta(seconds=10)
     callback_fn(NOW)
     assert journal.captures == 1
     assert journal._delayed_capture_unsub is None
@@ -401,7 +431,7 @@ def test_rescheduling_and_stopping_cancel_delayed_capture():
     second_callback = next(
         callback_fn
         for delay, callback_fn in scheduled_callbacks
-        if delay == timedelta(seconds=3) and callback_fn is not first_callback
+        if delay == timedelta(seconds=10) and callback_fn is not first_callback
     )
     cancel_delayed_capture(journal)
     assert ("cancelled", second_callback) in scheduled_callbacks

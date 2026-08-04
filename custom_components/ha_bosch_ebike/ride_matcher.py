@@ -17,6 +17,8 @@ DEPARTURE_AFTER = timedelta(minutes=10)
 ARRIVAL_BEFORE = timedelta(minutes=45)
 ARRIVAL_AFTER = timedelta(minutes=45)
 AMBIGUITY_SECONDS = 5 * 60
+EQUIVALENT_SOC_TOLERANCE = 0.1
+EQUIVALENT_ODOMETER_TOLERANCE_KM = 0.01
 
 MIN_SESSION_KM = 0.3
 MIN_DISTANCE_RATIO = 0.55
@@ -91,6 +93,49 @@ def _sample(window: dict[str, Any], key: str) -> dict[str, Any] | None:
 def _window_id(window: dict[str, Any]) -> str | None:
     value = window.get("id")
     return value if isinstance(value, str) and value else None
+
+
+def _equivalent_measurements(
+    first: RideContactMatch, second: RideContactMatch
+) -> bool:
+    """Return whether two candidates imply the same physical consumption.
+
+    Short BLE reconnects can split one garage contact into several windows.
+    They are safe to de-duplicate only when both measured endpoints agree;
+    otherwise the ambiguity remains deliberately fail-closed.
+    """
+    comparisons = (
+        (
+            first.start_sample.get("soc"),
+            second.start_sample.get("soc"),
+            EQUIVALENT_SOC_TOLERANCE,
+        ),
+        (
+            first.end_sample.get("soc"),
+            second.end_sample.get("soc"),
+            EQUIVALENT_SOC_TOLERANCE,
+        ),
+        (
+            first.start_sample.get("odometer_km"),
+            second.start_sample.get("odometer_km"),
+            EQUIVALENT_ODOMETER_TOLERANCE_KM,
+        ),
+        (
+            first.end_sample.get("odometer_km"),
+            second.end_sample.get("odometer_km"),
+            EQUIVALENT_ODOMETER_TOLERANCE_KM,
+        ),
+    )
+    for first_value, second_value, tolerance in comparisons:
+        first_number = _number(first_value)
+        second_number = _number(second_value)
+        if (
+            first_number is None
+            or second_number is None
+            or abs(first_number - second_number) > tolerance
+        ):
+            return False
+    return True
 
 
 def match_contact_windows(
@@ -186,14 +231,16 @@ def match_contact_windows(
         return RideMatchDecision("unmatched", reason="no_plausible_contact_pair")
 
     candidates.sort(key=lambda candidate: candidate.score_seconds)
-    if (
-        len(candidates) > 1
-        and candidates[1].score_seconds - candidates[0].score_seconds
-        < AMBIGUITY_SECONDS
-    ):
-        return RideMatchDecision("ambiguous", reason="multiple_contact_pairs")
+    best = candidates[0]
+    for alternative in candidates[1:]:
+        if alternative.score_seconds - best.score_seconds >= AMBIGUITY_SECONDS:
+            break
+        if not _equivalent_measurements(best, alternative):
+            return RideMatchDecision(
+                "ambiguous", reason="multiple_contact_pairs"
+            )
 
-    return RideMatchDecision("matched", match=candidates[0])
+    return RideMatchDecision("matched", match=best)
 
 
 def consumption_from_match(

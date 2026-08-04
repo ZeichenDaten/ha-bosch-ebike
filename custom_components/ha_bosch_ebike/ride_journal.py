@@ -24,7 +24,7 @@ FRESH_SAMPLE = timedelta(minutes=2)
 MAX_SAMPLE_SKEW = timedelta(seconds=10)
 MAX_FUTURE_SKEW = timedelta(seconds=5)
 STALE_ACTIVE = timedelta(minutes=15)
-CONTACT_SETTLE_DELAY = timedelta(seconds=3)
+CONTACT_SETTLE_DELAY = timedelta(seconds=10)
 INVALID_STATES = {None, "", "unknown", "unavailable"}
 
 
